@@ -183,131 +183,67 @@ static bool is_valid_ip_packet(struct sk_buff *skb)
     return true;
 }
 
-/* Hàm phân tích và lưu thông tin packet với comprehensive validation */
+/* Thu gọn hàm phân tích packet */
 static void analyze_and_store_packet(struct sk_buff *skb, const char *interface, const char *direction)
 {
     struct iphdr *ip_header;
-    struct tcphdr *tcp_header;
-    struct udphdr *udp_header;
     struct packet_info pkt_info;
-    int result;
     
-    // Validate tất cả input parameters
-    if (!skb || !interface || !direction) {
-        printk(KERN_WARNING "netfilter_capture: Invalid parameters in analyze_and_store_packet\n");
+    if (!skb || !interface || !is_valid_ip_packet(skb))
         return;
-    }
-
-    // Validate IP packet trước khi xử lý
-    if (!is_valid_ip_packet(skb)) {
-        return; // Bỏ qua packets không hợp lệ
-    }
     
-    // Initialize packet info structure với zero
     memset(&pkt_info, 0, sizeof(pkt_info));
-    
     ip_header = ip_hdr(skb);
     
-    // Lưu thông tin cơ bản từ IP header
     pkt_info.timestamp = jiffies;
     pkt_info.src_ip = ip_header->saddr;
     pkt_info.dst_ip = ip_header->daddr;
     pkt_info.protocol = ip_header->protocol;
     pkt_info.length = ntohs(ip_header->tot_len);
     pkt_info.is_valid = true;
-
-    // Copy interface name một cách an toàn
+    
     strncpy(pkt_info.interface, interface, IFNAMSIZ - 1);
-    pkt_info.interface[IFNAMSIZ - 1] = '\0';
-
-    // Copy direction string một cách an toàn
     strncpy(pkt_info.direction, direction, sizeof(pkt_info.direction) - 1);
-    pkt_info.direction[sizeof(pkt_info.direction) - 1] = '\0';
     
-    // Extract port information cho TCP/UDP với validation
-    pkt_info.src_port = 0;
-    pkt_info.dst_port = 0;
-    
-    if (ip_header->protocol == IPPROTO_TCP) {
-        // Kiểm tra có đủ data cho TCP header không
-        if (skb->len >= (ip_header->ihl * 4) + sizeof(struct tcphdr)) {
-            tcp_header = tcp_hdr(skb);
-            if (tcp_header) {
-                pkt_info.src_port = ntohs(tcp_header->source);
-                pkt_info.dst_port = ntohs(tcp_header->dest);
-            }
-        }
-    } else if (ip_header->protocol == IPPROTO_UDP) {
-        // Kiểm tra có đủ data cho UDP header không
-        if (skb->len >= (ip_header->ihl * 4) + sizeof(struct udphdr)) {
-            udp_header = udp_hdr(skb);
-            if (udp_header) {
-                pkt_info.src_port = ntohs(udp_header->source);
-                pkt_info.dst_port = ntohs(udp_header->dest);
-            }
-        }
-    }
-    
-    // Thêm packet vào ring buffer
-    result = add_packet_to_buffer(&capture_buffer, &pkt_info);
-    if (result == 0) {
-        total_packets++;
-        printk(KERN_INFO "netfilter_capture: 📦 Captured packet %s on %s: %pI4:%d -> %pI4:%d (protocol: %d, len: %d)\n",
-               direction, interface,
-               &pkt_info.src_ip, pkt_info.src_port,
-               &pkt_info.dst_ip, pkt_info.dst_port,
-               pkt_info.protocol, pkt_info.length);
-    } else {
-        printk(KERN_WARNING "netfilter_capture: Failed to store packet (error: %d)\n", result);
-    }
+    add_packet_to_buffer(&capture_buffer, &pkt_info);
 }
-
-/* Hook function cho INPUT chain - capture incoming packets */
-static unsigned int hook_func_in(void *priv,
-                                struct sk_buff *skb,
-                                const struct nf_hook_state *state)
+/* Thu gọn thành một hook function duy nhất */
+static unsigned int vnet_hook_func(void *priv,
+                                  struct sk_buff *skb,
+                                  const struct nf_hook_state *state)
 {
-    // Validate hook state và input interface
-    if (!state || !state->in) {
+    const char *interface_name = NULL;
+    const char *direction = "UNKNOWN";
+    
+    if (!state || !skb)
         return NF_ACCEPT;
-    }
-
-    // Chỉ capture packets từ virtual interfaces của chúng ta
-    if (strncmp(state->in->name, "vnet", 4) == 0) {
-        analyze_and_store_packet(skb, state->in->name, "IN");
+        
+    // Xác định interface và direction
+    if (state->in && strncmp(state->in->name, "vnet", 4) == 0) {
+        interface_name = state->in->name;
+        direction = "IN";
+    } else if (state->out && strncmp(state->out->name, "vnet", 4) == 0) {
+        interface_name = state->out->name;
+        direction = "OUT";
     }
     
-    return NF_ACCEPT; /* Luôn cho phép packet đi tiếp */
-}
-
-/* Hook function cho OUTPUT chain - capture outgoing packets */
-static unsigned int hook_func_out(void *priv,
-                                 struct sk_buff *skb,
-                                 const struct nf_hook_state *state)
-{
-    // Validate hook state và output interface
-    if (!state || !state->out) {
-        return NF_ACCEPT;
-    }
-
-    // Chỉ capture packets từ virtual interfaces của chúng ta
-    if (strncmp(state->out->name, "vnet", 4) == 0) {
-        analyze_and_store_packet(skb, state->out->name, "OUT");
+    if (interface_name) {
+        analyze_and_store_packet(skb, interface_name, direction);
     }
     
-    return NF_ACCEPT; /* Luôn cho phép packet đi tiếp */
+    return NF_ACCEPT;
 }
 
-/* Cấu trúc netfilter hooks cho INPUT và OUTPUT chains */
+/* Thu gọn netfilter hooks - sử dụng cùng một hook function */
 static struct nf_hook_ops netfilter_ops_in = {
-    .hook = hook_func_in,
+    .hook = vnet_hook_func,
     .hooknum = NF_INET_LOCAL_IN,
     .pf = PF_INET,
     .priority = NF_IP_PRI_FIRST,
 };
 
 static struct nf_hook_ops netfilter_ops_out = {
-    .hook = hook_func_out,
+    .hook = vnet_hook_func,
     .hooknum = NF_INET_LOCAL_OUT,
     .pf = PF_INET,
     .priority = NF_IP_PRI_FIRST,

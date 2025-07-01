@@ -17,103 +17,45 @@ int packet_count = 0;
 static atomic_t total_packets_sent = ATOMIC_INIT(0);
 static atomic_t total_packets_received = ATOMIC_INIT(0);
 
-/* Hàm validate network device state - kiểm tra device có sẵn sàng không */
+/* Thu gọn hàm validate device state */
 static bool is_device_ready(struct net_device *dev)
 {
-    /* Kiểm tra device pointer có hợp lệ không */
-    if (!dev) {
-        vnet_error("Device pointer is NULL\n");
-        return false;
-    }
-
-    /* Kiểm tra device có present trong system không */
-    if (!netif_device_present(dev)) {
-        vnet_error("Device %s is not present in system\n", dev->name);
-        return false;
-    }
-
-    /* Kiểm tra device có đang running không */
-    if (!netif_running(dev)) {
-        vnet_warning("Device %s is not in running state\n", dev->name);
-        return false;
-    }
-
-    return true;
+    return dev && netif_device_present(dev) && netif_running(dev);
 }
 
-/* Hàm mở interface - được gọi khi user up interface */
+/* Thu gọn hàm mở interface */
 int vnet_open(struct net_device *dev)
 {
     struct vnet_priv *priv;
 
-    /* Validate input parameters */
-    if (!dev) {
-        vnet_error("Cannot open NULL device\n");
+    if (!dev || !(priv = netdev_priv(dev)))
         return -EINVAL;
-    }
 
-    priv = netdev_priv(dev);
-    if (!priv) {
-        vnet_error("Private data is NULL for device %s\n", dev->name);
-        return -EINVAL;
-    }
-
-    vnet_info("🚀 Opening interface %s (ID: %d)\n", dev->name, priv->id);
-
-    /* Kiểm tra peer device có được thiết lập chưa */
-    if (!priv->peer) {
-        vnet_warning("Peer device not configured for %s\n", dev->name);
-    } else {
-        vnet_info("Peer device for %s is %s\n", dev->name, priv->peer->name);
-    }
-
-    /* Bắt đầu transmission queue để có thể gửi packets */
-    netif_start_queue(dev);
-
-    /* Reset statistics khi mở device lần đầu */
-    memset(&priv->stats, 0, sizeof(priv->stats));
+    vnet_info("Mở interface %s\n", dev->name);
     
-    /* Đánh dấu interface là active */
+    netif_start_queue(dev);
+    memset(&priv->stats, 0, sizeof(priv->stats));
     priv->is_active = true;
-    priv->last_tx_jiffies = jiffies;
-    priv->last_rx_jiffies = jiffies;
-
-    vnet_info("✅ Interface %s opened successfully\n", dev->name);
 
     return 0;
 }
 
-/* Hàm đóng interface - được gọi khi user down interface */
+/* Thu gọn hàm đóng interface */
 int vnet_close(struct net_device *dev)
 {
     struct vnet_priv *priv;
 
-    /* Validate input */
-    if (!dev) {
-        vnet_error("Cannot close NULL device\n");
+    if (!dev)
         return -EINVAL;
-    }
 
     priv = netdev_priv(dev);
-    vnet_info("🛑 Closing interface %s\n", dev->name);
+    vnet_info("Đóng interface %s\n", dev->name);
 
-    /* Dừng transmission queue ngay lập tức */
     netif_stop_queue(dev);
-
-    /* Đợi tất cả pending transactions hoàn thành */
     netif_tx_disable(dev);
-
-    /* Log final statistics trước khi đóng */
-    if (priv) {
-        vnet_info("Final stats for %s - TX: %lu packets (%lu bytes), RX: %lu packets (%lu bytes)\n",
-               dev->name, priv->stats.tx_packets, priv->stats.tx_bytes,
-               priv->stats.rx_packets, priv->stats.rx_bytes);
-        
-        /* Đánh dấu interface không còn active */
+    
+    if (priv)
         priv->is_active = false;
-    }
-
-    vnet_info("✅ Interface %s closed successfully\n", dev->name);
 
     return 0;
 }
@@ -168,23 +110,13 @@ static int create_captured_packet(struct sk_buff *skb, struct net_device *dev, i
         return -ENOMEM;
     }
 
-    /* Copy SKB data để capture - quan trọng để preserve packet */
-    cap_pkt->skb = skb_copy(skb, GFP_ATOMIC);
-    if (!cap_pkt->skb) {
-        vnet_warning("Failed to copy SKB for packet capture\n");
-        kfree(cap_pkt);
-        return -ENOMEM;
-    }
-
-    /* Thiết lập metadata cho captured packet */
+    /* Thu gọn captured packet */
     strncpy(cap_pkt->interface_name, dev->name, IFNAMSIZ - 1);
-    cap_pkt->interface_name[IFNAMSIZ - 1] = '\0';
     cap_pkt->timestamp = jiffies;
-    cap_pkt->direction = direction;
     cap_pkt->packet_size = skb->len;
     cap_pkt->is_valid = true;
 
-    /* Extract thông tin IP và port nếu có */
+    /* Thu gọn IP info nếu có */
     if (skb->protocol == htons(ETH_P_IP)) {
         struct iphdr *iph = ip_hdr(skb);
         if (iph) {
@@ -202,9 +134,7 @@ static int create_captured_packet(struct sk_buff *skb, struct net_device *dev, i
         struct captured_packet *old_pkt = list_first_entry(&captured_packets, 
                                                            struct captured_packet, list);
         list_del(&old_pkt->list);
-        if (old_pkt->skb) {
-            dev_kfree_skb(old_pkt->skb);
-        }
+        /* Thu gọn cleanup - không cần SKB reference */
         kfree(old_pkt);
         packet_count--;
     }
@@ -301,14 +231,12 @@ netdev_tx_t vnet_start_xmit(struct sk_buff *skb, struct net_device *dev)
     spin_lock_irqsave(&priv->lock, flags);
     priv->stats.tx_packets++;
     priv->stats.tx_bytes += skb->len;
-    priv->last_tx_jiffies = jiffies;
     spin_unlock_irqrestore(&priv->lock, flags);
 
     /* Cập nhật statistics cho receiver device */
     spin_lock_irqsave(&peer_priv->lock, flags);
     peer_priv->stats.rx_packets++;
     peer_priv->stats.rx_bytes += new_skb->len;
-    peer_priv->last_rx_jiffies = jiffies;
     spin_unlock_irqrestore(&peer_priv->lock, flags);
 
     /* Update global atomic counters */
@@ -418,10 +346,8 @@ static void vnet_setup(struct net_device *dev)
         memset(priv, 0, sizeof(struct vnet_priv));
         spin_lock_init(&priv->lock);
         priv->peer = NULL;
-        priv->id = -1; /* Sẽ được set trong init function */
+        priv->id = -1;
         priv->is_active = false;
-        priv->last_tx_jiffies = jiffies;
-        priv->last_rx_jiffies = jiffies;
     }
 
     /* Generate random MAC address cho mỗi interface */
@@ -563,9 +489,7 @@ void vnet_cleanup(void)
     spin_lock_irqsave(&capture_lock, flags);
     list_for_each_entry_safe(cap_pkt, tmp, &captured_packets, list) {
         list_del(&cap_pkt->list);
-        if (cap_pkt->skb) {
-            dev_kfree_skb(cap_pkt->skb);
-        }
+        /* Thu gọn cleanup - không cần SKB reference */
         kfree(cap_pkt);
     }
     vnet_info("✅ Cleaned up %d captured packets\n", packet_count);

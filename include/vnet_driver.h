@@ -22,32 +22,26 @@
 #define VNET_STATS_PROC_NAME "vnet_stats"  // Tên file proc cho statistics
 #define VNET_MAX_CAPTURED_PACKETS 10000    // Số lượng packet tối đa được capture
 
-/* Cấu trúc lưu trữ thông tin private của mỗi interface */
+/* Thu gọn struct vnet_priv - loại bỏ fields ít sử dụng */
 struct vnet_priv {
-    struct net_device_stats stats;    /* Thống kê network device (tx/rx packets/bytes) */
-    struct net_device *peer;          /* Con trỏ tới interface đối tác (vnet0 <-> vnet1) */
-    spinlock_t lock;                  /* Lock để đồng bộ hóa truy cập concurrent */
-    char name[IFNAMSIZ];             /* Tên interface (vnet0 hoặc vnet1) */
-    int id;                          /* ID của interface (0 cho vnet0, 1 cho vnet1) */
-    unsigned long last_tx_jiffies;    /* Timestamp của packet cuối cùng được gửi */
-    unsigned long last_rx_jiffies;    /* Timestamp của packet cuối cùng được nhận */
-    bool is_active;                   /* Trạng thái hoạt động của interface */
+    struct net_device_stats stats;    /* Thống kê network device */
+    struct net_device *peer;          /* Interface đối tác */
+    spinlock_t lock;                  /* Lock đồng bộ hóa */
+    char name[IFNAMSIZ];             /* Tên interface */
+    int id;                          /* ID của interface */
+    bool is_active;                   /* Trạng thái hoạt động */
 };
 
-/* Cấu trúc lưu packet đã bắt được cho debugging và monitoring */
+/* Thu gọn struct captured_packet - loại bỏ fields redundant */
 struct captured_packet {
-    struct list_head list;            /* Node trong linked list để quản lý packets */
-    struct sk_buff *skb;              /* Socket buffer chứa packet data thực tế */
-    char interface_name[IFNAMSIZ];    /* Tên interface đã bắt packet này */
-    unsigned long timestamp;          /* Timestamp khi bắt packet (sử dụng jiffies) */
-    int direction;                    /* Hướng packet: 0: vnet0->vnet1, 1: vnet1->vnet0 */
-    __be32 src_ip;                   /* Source IP address (network byte order) */
-    __be32 dst_ip;                   /* Destination IP address (network byte order) */
-    __be16 src_port;                 /* Source port (network byte order) */
-    __be16 dst_port;                 /* Destination port (network byte order) */
-    __u8 protocol;                   /* Protocol type (TCP=6, UDP=17, ICMP=1) */
-    __u16 packet_size;               /* Kích thước thực tế của packet */
-    bool is_valid;                   /* Flag đánh dấu packet có hợp lệ và complete */
+    struct list_head list;            /* Node trong linked list */
+    char interface_name[IFNAMSIZ];    /* Tên interface */
+    unsigned long timestamp;          /* Timestamp */
+    __be32 src_ip;                   /* Source IP */
+    __be32 dst_ip;                   /* Destination IP */
+    __u8 protocol;                   /* Protocol type */
+    __u16 packet_size;               /* Kích thước packet */
+    bool is_valid;                   /* Flag hợp lệ */
 };
 
 /* Cấu trúc để tracking performance metrics cho monitoring */

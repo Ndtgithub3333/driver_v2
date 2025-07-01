@@ -81,113 +81,30 @@ install_ubuntu_deps() {
     print_success "Đã cài đặt documentation tools"
 }
 
-# Cài đặt dependencies cho CentOS/RHEL/Fedora
-install_rhel_deps() {
-    print_header "Cài đặt dependencies cho RHEL/CentOS/Fedora"
+# Thu gọn function setup permissions
+setup_ubuntu_environment() {
+    print_header "Thiết lập môi trường Ubuntu"
     
-    # Xác định package manager
-    if command -v dnf >/dev/null 2>&1; then
-        PKG_MGR="dnf"
-    elif command -v yum >/dev/null 2>&1; then
-        PKG_MGR="yum"
-    else
-        print_error "Không tìm thấy package manager"
-        exit 1
-    fi
-    
-    # Cài đặt kernel headers
-    KERNEL_VERSION=$(uname -r)
-    $PKG_MGR install -y kernel-headers-${KERNEL_VERSION} kernel-devel-${KERNEL_VERSION}
-    print_success "Đã cài đặt kernel headers"
-    
-    # Cài đặt build tools
-    $PKG_MGR groupinstall -y "Development Tools"
-    print_success "Đã cài đặt build tools"
-    
-    # Cài đặt network tools
-    $PKG_MGR install -y iproute2 nc iptables
-    print_success "Đã cài đặt network tools"
-    
-    # Cài đặt debugging tools
-    $PKG_MGR install -y gdb strace tcpdump
-    print_success "Đã cài đặt debugging tools"
-}
-
-# Thiết lập permissions
-setup_permissions() {
-    print_header "Thiết lập permissions"
-    
-    # Thêm user vào nhóm có thể sử dụng netcat
+    # Kết hợp permission và kernel setup
     if [ -n "$SUDO_USER" ]; then
         usermod -a -G adm "$SUDO_USER" 2>/dev/null || true
-        print_success "Đã thêm user $SUDO_USER vào group adm"
     fi
     
-    # Thiết lập permissions cho proc filesystem
-    chmod 644 /proc/sys/net/core/* 2>/dev/null || true
-    print_success "Đã thiết lập permissions cho networking"
-}
-
-# Cấu hình kernel parameters
-configure_kernel() {
-    print_header "Cấu hình kernel parameters"
-    
-    # Tạo file cấu hình
+    # Cấu hình kernel parameters cần thiết
     cat > /etc/sysctl.d/99-vnet-driver.conf << EOF
 # Virtual Network Driver Configuration
-# Tăng buffer sizes cho network
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
-net.core.netdev_max_backlog = 5000
-
-# Enable IP forwarding
 net.ipv4.ip_forward = 1
-
-# Disable reverse path filtering cho virtual interfaces
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
 EOF
     
-    # Apply cấu hình
     sysctl -p /etc/sysctl.d/99-vnet-driver.conf
-    print_success "Đã cấu hình kernel parameters"
+    print_success "Đã cấu hình môi trường Ubuntu"
 }
 
-# Tạo systemd service (optional)
-create_systemd_service() {
-    print_header "Tạo systemd service (optional)"
-    
-    read -p "Bạn có muốn tạo systemd service để auto-load modules không? (y/N): " -n 1 -r
-    echo
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        cat > /etc/systemd/system/vnet-driver.service << 'EOF'
-[Unit]
-Description=Virtual Network Driver
-After=network.target
-Wants=network.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'cd /opt/vnet-driver && make load'
-ExecStop=/bin/bash -c 'cd /opt/vnet-driver && make unload'
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        systemctl daemon-reload
-        print_success "Đã tạo systemd service: vnet-driver.service"
-        print_warning "Sử dụng: systemctl enable vnet-driver để auto-start"
-    else
-        print_warning "Bỏ qua tạo systemd service"
-    fi
-}
-
-# Tạo aliases hữu ích
+# Thu gọn aliases 
 create_aliases() {
     print_header "Tạo aliases hữu ích"
     
@@ -197,17 +114,13 @@ create_aliases() {
 # Virtual Network Driver Aliases
 alias vnet-build='cd /opt/vnet-driver && make all'
 alias vnet-test='cd /opt/vnet-driver && sudo make test'
-alias vnet-load='cd /opt/vnet-driver && sudo make load'
-alias vnet-unload='cd /opt/vnet-driver && sudo make unload'
 alias vnet-status='cd /opt/vnet-driver && make status'
-alias vnet-logs='dmesg | grep -E "vnet|netfilter_capture" | tail -20'
-alias vnet-capture='cat /proc/vnet_capture 2>/dev/null || echo "Capture not available"'
+alias vnet-logs='dmesg | grep vnet | tail -20'
 alias vnet-clean='cd /opt/vnet-driver && make clean'
 EOF
     
     chmod +x "$ALIAS_FILE"
-    print_success "Đã tạo aliases tại: $ALIAS_FILE"
-    print_warning "Restart shell hoặc chạy: source $ALIAS_FILE"
+    print_success "Đã tạo aliases đơn giản"
 }
 
 # Tạo development scripts
@@ -315,47 +228,31 @@ validate_installation() {
     print_success "Validation completed"
 }
 
-# Main function
+# Thu gọn main function - chỉ hỗ trợ Ubuntu
 main() {
     echo -e "${BLUE}"
-    echo "=================================================="
-    echo "🔧 Virtual Network Driver Development Setup"
-    echo "=================================================="
+    echo "================================="
+    echo "🔧 Virtual Network Driver Setup"
+    echo "================================="
     echo -e "${NC}"
     
     check_root
     detect_distro
     
-    case $DISTRO in
-        ubuntu|debian)
-            install_ubuntu_deps
-            ;;
-        centos|rhel|fedora)
-            install_rhel_deps
-            ;;
-        *)
-            print_warning "Unsupported distribution: $DISTRO"
-            print_warning "Manually install: kernel-headers, build-essential, netcat, iproute2"
-            ;;
-    esac
+    if [[ "$DISTRO" != "ubuntu" && "$DISTRO" != "debian" ]]; then
+        print_error "Chỉ hỗ trợ Ubuntu/Debian"
+        exit 1
+    fi
     
-    setup_permissions
-    configure_kernel
-    create_systemd_service
+    install_ubuntu_deps
+    setup_ubuntu_environment
     create_aliases
     create_dev_scripts
     validate_installation
     
     print_header "🎉 Setup Complete"
     print_success "Development environment đã được thiết lập!"
-    print_warning "Restart shell để sử dụng aliases"
-    print_warning "Available commands:"
-    echo "  vnet-build      # Build modules"
-    echo "  vnet-test       # Run tests"
-    echo "  vnet-debug      # Debug information"
-    echo "  vnet-quicktest  # Quick functionality test"
-    echo ""
-    print_success "Bây giờ bạn có thể chạy: make all && make test"
+    print_success "Chạy: make all && make test"
 }
 
 # Run main function

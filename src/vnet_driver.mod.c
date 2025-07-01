@@ -35,8 +35,6 @@ MODULE_INFO(retpoline, "Y");
 
 static const char ____versions[]
 __used __section("__versions") =
-	"\x10\x00\x00\x00\xa6\x50\xba\x15"
-	"jiffies\0"
 	"\x1c\x00\x00\x00\x08\xdf\xf4\xca"
 	"alloc_netdev_mqs\0\0\0\0"
 	"\x18\x00\x00\x00\x89\x15\x43\x4e"
@@ -55,10 +53,10 @@ __used __section("__versions") =
 	"kmalloc_caches\0\0"
 	"\x20\x00\x00\x00\x56\x45\x8f\xe4"
 	"__kmalloc_cache_noprof\0\0"
-	"\x14\x00\x00\x00\xdc\x93\x96\x75"
-	"skb_copy\0\0\0\0"
 	"\x10\x00\x00\x00\xda\xfa\x66\x91"
 	"strncpy\0"
+	"\x10\x00\x00\x00\xa6\x50\xba\x15"
+	"jiffies\0"
 	"\x20\x00\x00\x00\x0b\x05\xdb\x34"
 	"_raw_spin_lock_irqsave\0\0"
 	"\x24\x00\x00\x00\x70\xce\x5c\xd3"
@@ -73,6 +71,8 @@ __used __section("__versions") =
 	"consume_skb\0"
 	"\x10\x00\x00\x00\xba\x0c\x7a\x03"
 	"kfree\0\0\0"
+	"\x14\x00\x00\x00\xdc\x93\x96\x75"
+	"skb_copy\0\0\0\0"
 	"\x14\x00\x00\x00\xba\x46\x1d\x55"
 	"pcpu_hot\0\0\0\0"
 	"\x18\x00\x00\x00\x64\xbd\x8f\xba"
@@ -96,4 +96,4 @@ __used __section("__versions") =
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "BDDC0D16DF8FEE8768EC7FF");
+MODULE_INFO(srcversion, "8F2A7426321D8F81A6D1F55");
