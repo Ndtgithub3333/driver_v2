@@ -1,0 +1,24 @@
+# Kernel module build artifacts
+src/*.ko
+src/*.mod
+src/*.mod.c
+src/*.mod.o
+src/*.o
+src/.*.cmd
+src/Module.symvers
+src/modules.order
+
+# Test and log files
+logs/
+/tmp/vnet_*
+*.log
+
+# Backup files
+*~
+*.bak
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
