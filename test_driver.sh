@@ -581,7 +581,8 @@ stress_test() {
     # Lấy packet count trước khi bắt đầu
     local PACKETS_BEFORE=0
     if [ -f "/proc/vnet_capture" ]; then
-        PACKETS_BEFORE=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+        PACKETS_BEFORE=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null)
+        PACKETS_BEFORE=${PACKETS_BEFORE:-0}
     fi
     print_info "Packets captured trước test: $PACKETS_BEFORE"
     
@@ -612,8 +613,11 @@ stress_test() {
     for batch in $(seq 1 $BATCH_COUNT); do
         print_info "Batch $batch/$BATCH_COUNT - Gửi $BATCH_SIZE connections..."
         
-        # Tạo batch connections
+        # Tạo batch connections với result capture
         local batch_pids=()
+        local batch_results_file="/tmp/stress_batch_${batch}_$$.txt"
+        rm -f "$batch_results_file"
+        
         for i in $(seq 1 $BATCH_SIZE); do
             local conn_id=$(((batch-1) * BATCH_SIZE + i))
             local test_message="Stress test batch $batch conn $i (ID: $conn_id) - $(date +%H:%M:%S.%3N)"
@@ -621,27 +625,41 @@ stress_test() {
             # Chạy connection với timeout và error handling
             (
                 if echo "$test_message" | timeout $CONNECTION_TIMEOUT nc -w $CONNECTION_TIMEOUT -s "$VNET0_IP" "$VNET1_IP" "$TEST_PORT" >/dev/null 2>&1; then
-                    echo "SUCCESS:$conn_id"
+                    echo "SUCCESS:$conn_id" >> "$batch_results_file"
                 else
-                    echo "FAILED:$conn_id"
+                    echo "FAILED:$conn_id" >> "$batch_results_file"
                 fi
             ) &
             batch_pids+=($!)
         done
         
-        # Đợi batch hoàn thành và đếm kết quả
+        # Đợi tất cả processes trong batch hoàn thành
         for pid in "${batch_pids[@]}"; do
-            if wait $pid 2>/dev/null; then
-                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-            else
-                FAILED_COUNT=$((FAILED_COUNT + 1))
-            fi
+            wait $pid 2>/dev/null || true
         done
+        
+        # Đếm kết quả từ file
+        if [ -f "$batch_results_file" ]; then
+            local batch_success=$(grep -c "SUCCESS:" "$batch_results_file" 2>/dev/null)
+            local batch_failed=$(grep -c "FAILED:" "$batch_results_file" 2>/dev/null)
+            
+            # Ensure variables have valid numeric values
+            batch_success=${batch_success:-0}
+            batch_failed=${batch_failed:-0}
+            
+            SUCCESS_COUNT=$((SUCCESS_COUNT + batch_success))
+            FAILED_COUNT=$((FAILED_COUNT + batch_failed))
+            rm -f "$batch_results_file"
+        else
+            # Fallback nếu file không tồn tại
+            FAILED_COUNT=$((FAILED_COUNT + BATCH_SIZE))
+        fi
         
         # Real-time monitoring
         local PACKETS_CURRENT=0
         if [ -f "/proc/vnet_capture" ]; then
-            PACKETS_CURRENT=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+            PACKETS_CURRENT=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null)
+            PACKETS_CURRENT=${PACKETS_CURRENT:-0}
         fi
         local NEW_PACKETS=$((PACKETS_CURRENT - PACKETS_BEFORE))
         
@@ -670,7 +688,8 @@ stress_test() {
     # Kiểm tra packet capture cuối cùng
     local PACKETS_AFTER=0
     if [ -f "/proc/vnet_capture" ]; then
-        PACKETS_AFTER=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+        PACKETS_AFTER=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null)
+        PACKETS_AFTER=${PACKETS_AFTER:-0}
     fi
     local TOTAL_NEW_PACKETS=$((PACKETS_AFTER - PACKETS_BEFORE))
     
