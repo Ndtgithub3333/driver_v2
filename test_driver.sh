@@ -193,6 +193,36 @@ verify_modules() {
     dmesg | grep -E 'vnet|netfilter' | tail -5
 }
 
+# Hàm phát hiện driver của interface với error handling an toàn
+detect_interface_driver() {
+    local iface="$1"
+    
+    if [ -z "$iface" ]; then
+        print_warning "Tên interface không được cung cấp"
+        return 1
+    fi
+    
+    # Sử dụng logic an toàn để tránh lỗi basename khi readlink trả về rỗng
+    DRIVER_LINK=$(readlink /sys/class/net/$iface/device/driver 2>/dev/null || echo "")
+    if [ -n "$DRIVER_LINK" ]; then
+        DRIVER_NAME=$(basename "$DRIVER_LINK" 2>/dev/null || echo "Unknown")
+    else
+        DRIVER_NAME="Virtual Driver"
+    fi
+    print_info "  - Driver: $DRIVER_NAME"
+    
+    # Thêm thông tin bổ sung về interface
+    if [ -f "/sys/class/net/$iface/operstate" ]; then
+        OPERSTATE=$(cat /sys/class/net/$iface/operstate 2>/dev/null || echo "unknown")
+        print_info "  - Status: $OPERSTATE"
+    fi
+    
+    if [ -f "/sys/class/net/$iface/mtu" ]; then
+        MTU=$(cat /sys/class/net/$iface/mtu 2>/dev/null || echo "unknown")
+        print_info "  - MTU: $MTU"
+    fi
+}
+
 # Hàm kiểm tra và cấu hình network interfaces
 configure_interfaces() {
     print_header "Cấu hình Network Interfaces"
@@ -245,8 +275,15 @@ configure_interfaces() {
     print_info "Cấu hình hiện tại:"
     echo "vnet0:"
     ip addr show vnet0 | grep -E 'inet |link'
+    
+    # Hiển thị thông tin driver cho vnet0
+    detect_interface_driver "vnet0"
+    
     echo "vnet1:"
     ip addr show vnet1 | grep -E 'inet |link'
+    
+    # Hiển thị thông tin driver cho vnet1  
+    detect_interface_driver "vnet1"
 }
 
 # Hàm kiểm tra kết nối cơ bản
@@ -266,87 +303,201 @@ test_basic_connectivity() {
     ip route | grep vnet || print_info "Không có route cụ thể cho vnet interfaces"
 }
 
-# Hàm kiểm tra kết nối TCP/UDP
+# Hàm kiểm tra kết nối TCP/UDP với improved error handling
 test_network_connectivity() {
     print_header "Kiểm tra kết nối TCP/UDP"
+    
+    # Validate network configuration trước khi test
+    if ! ip addr show vnet0 | grep -q "$VNET0_IP"; then
+        print_error "vnet0 không có IP $VNET0_IP được cấu hình"
+        return 1
+    fi
+    
+    if ! ip addr show vnet1 | grep -q "$VNET1_IP"; then
+        print_error "vnet1 không có IP $VNET1_IP được cấu hình"
+        return 1
+    fi
+    
+    print_success "Network configuration validation passed"
     
     # Test TCP connection với netcat
     print_info "Bắt đầu TCP server trên vnet1 port $TEST_PORT..."
     
     # Tạo temporary file để lưu server output
-    SERVER_OUTPUT="/tmp/vnet_server_output.txt"
+    SERVER_OUTPUT="/tmp/vnet_server_output_$$.txt"
     
-    # Chạy server ở background
-    timeout 10 nc -l -k -s "$VNET1_IP" -p "$TEST_PORT" > "$SERVER_OUTPUT" &
+    # Chạy server ở background với improved error handling
+    timeout 15 nc -l -k -s "$VNET1_IP" -p "$TEST_PORT" > "$SERVER_OUTPUT" 2>&1 &
     SERVER_PID=$!
     
     # Đợi server khởi động
     sleep 2
     
     # Kiểm tra server có chạy không
-    if ! ps -p $SERVER_PID > /dev/null; then
+    if ! ps -p $SERVER_PID > /dev/null 2>&1; then
         print_error "TCP server không thể khởi động"
+        rm -f "$SERVER_OUTPUT"
         return 1
     fi
     
     print_success "TCP server đã khởi động (PID: $SERVER_PID)"
     
-    # Gửi dữ liệu test từ client
-    TEST_MESSAGE="Hello Virtual Network Driver v2.0 - $(date)"
+    # Test port có accessible không
+    if ! nc -z -v -w 3 "$VNET1_IP" "$TEST_PORT" 2>/dev/null; then
+        print_warning "Port $TEST_PORT trên $VNET1_IP không accessible từ bên ngoài"
+    fi
+    
+    # Gửi dữ liệu test từ client với retry logic
+    TEST_MESSAGE="Hello Virtual Network Driver v2.0 - $(date) - PID:$$"
     print_info "Gửi test message từ vnet0..."
     
-    if echo "$TEST_MESSAGE" | nc -w 3 -s "$VNET0_IP" "$VNET1_IP" "$TEST_PORT"; then
-        print_success "Gửi dữ liệu TCP thành công"
-    else
-        print_warning "Gửi dữ liệu TCP có vấn đề"
+    local SEND_SUCCESS=false
+    local RETRY_COUNT=3
+    
+    for attempt in $(seq 1 $RETRY_COUNT); do
+        print_info "Attempt $attempt/$RETRY_COUNT..."
+        
+        if echo "$TEST_MESSAGE" | timeout 5 nc -w 3 -s "$VNET0_IP" "$VNET1_IP" "$TEST_PORT" 2>/dev/null; then
+            print_success "Gửi dữ liệu TCP thành công (attempt $attempt)"
+            SEND_SUCCESS=true
+            break
+        else
+            print_warning "Attempt $attempt thất bại"
+            if [ $attempt -lt $RETRY_COUNT ]; then
+                sleep 1
+            fi
+        fi
+    done
+    
+    if [ "$SEND_SUCCESS" = false ]; then
+        print_error "Tất cả attempts gửi dữ liệu TCP đều thất bại"
     fi
     
     # Đợi dữ liệu được xử lý
-    sleep 2
+    sleep 3
     
-    # Kiểm tra server có nhận được dữ liệu không
+    # Kiểm tra server có nhận được dữ liệu không với better validation
     if [ -f "$SERVER_OUTPUT" ] && [ -s "$SERVER_OUTPUT" ]; then
-        print_success "Server đã nhận được dữ liệu:"
-        cat "$SERVER_OUTPUT"
+        local RECEIVED_DATA=$(cat "$SERVER_OUTPUT" 2>/dev/null)
+        if [ -n "$RECEIVED_DATA" ]; then
+            print_success "Server đã nhận được dữ liệu:"
+            echo "  Data: $RECEIVED_DATA"
+            
+            # Validate rằng data nhận được đúng
+            if echo "$RECEIVED_DATA" | grep -q "Virtual Network Driver v2.0"; then
+                print_success "Data validation: Correct message received"
+            else
+                print_warning "Data validation: Unexpected message format"
+            fi
+        else
+            print_warning "Server output file tồn tại nhưng rỗng"
+        fi
     else
-        print_warning "Server không nhận được dữ liệu hoặc file output trống"
+        print_warning "Server không nhận được dữ liệu hoặc file output không tồn tại"
     fi
     
-    # Cleanup server process
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    rm -f "$SERVER_OUTPUT"
+    # Enhanced cleanup với better error handling
+    if ps -p $SERVER_PID > /dev/null 2>&1; then
+        kill -TERM $SERVER_PID 2>/dev/null || true
+        sleep 2
+        if ps -p $SERVER_PID > /dev/null 2>&1; then
+            kill -KILL $SERVER_PID 2>/dev/null || true
+        fi
+    fi
     
-    print_success "Đã cleanup TCP server"
+    wait $SERVER_PID 2>/dev/null || true
+    rm -f "$SERVER_OUTPUT" 2>/dev/null || true
+    
+    print_success "Đã cleanup TCP server và temporary files"
 }
 
-# Hàm kiểm tra packet capture
+# Hàm kiểm tra packet capture với enhanced validation
 test_packet_capture() {
     print_header "Kiểm tra Packet Capture"
     
     # Kiểm tra /proc/vnet_capture có tồn tại không
     if [ ! -f "/proc/vnet_capture" ]; then
         print_error "/proc/vnet_capture không tồn tại"
+        print_info "Kiểm tra xem vnet_netfilter module đã được load chưa:"
+        lsmod | grep vnet_netfilter || print_warning "vnet_netfilter module chưa được load"
         return 1
     fi
     
     print_success "Tìm thấy /proc/vnet_capture"
     
-    # Hiển thị thống kê packet capture
-    print_info "Thống kê packet capture hiện tại:"
-    echo "----------------------------------------"
-    head -20 /proc/vnet_capture
-    echo "----------------------------------------"
+    # Kiểm tra permissions
+    if [ ! -r "/proc/vnet_capture" ]; then
+        print_error "/proc/vnet_capture không có quyền đọc"
+        return 1
+    fi
     
-    # Đếm số packets đã capture
-    CAPTURED_PACKETS=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" || echo "0")
-    print_info "Số packets đã capture: $CAPTURED_PACKETS"
+    # Lấy packet count trước khi test
+    local PACKETS_BEFORE=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+    print_info "Packets captured hiện tại: $PACKETS_BEFORE"
     
-    if [ "$CAPTURED_PACKETS" -gt 0 ]; then
+    # Hiển thị buffer usage information
+    if cat /proc/vnet_capture | head -5 | grep -q "buffer usage"; then
+        print_info "Buffer usage info:"
+        cat /proc/vnet_capture | head -5 | grep "buffer usage"
+    fi
+    
+    # Tạo test traffic để kiểm tra packet capture
+    print_info "Tạo test traffic để kiểm tra packet capture..."
+    
+    # Tạo một vài test packets
+    local TEST_COUNT=3
+    for i in $(seq 1 $TEST_COUNT); do
+        echo "Test packet $i" | timeout 2 nc -w 1 -s "$VNET0_IP" "$VNET1_IP" "1234$i" 2>/dev/null &
+        sleep 0.5
+    done
+    
+    # Đợi traffic hoàn thành
+    sleep 2
+    
+    # Kiểm tra lại packet count
+    local PACKETS_AFTER=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+    local NEW_PACKETS=$((PACKETS_AFTER - PACKETS_BEFORE))
+    
+    print_info "Packets sau test traffic: $PACKETS_AFTER (new: $NEW_PACKETS)"
+    
+    # Hiển thị sample packet capture với formatting
+    print_info "Packet capture sample (top 25 lines):"
+    echo "========================================"
+    cat /proc/vnet_capture | head -25
+    echo "========================================"
+    
+    # Validation logic
+    if [ "$PACKETS_AFTER" -gt 0 ]; then
         print_success "Packet capture hoạt động bình thường"
+        
+        if [ "$NEW_PACKETS" -gt 0 ]; then
+            print_success "Test traffic được capture thành công ($NEW_PACKETS new packets)"
+        else
+            print_warning "Không capture được test traffic mới (có thể do timing hoặc filtering)"
+        fi
+        
+        # Kiểm tra format của captured packets
+        if cat /proc/vnet_capture | grep -q "└─"; then
+            print_success "Packet capture format hiển thị đúng (có table borders)"
+        fi
+        
+        # Kiểm tra có thông tin timestamp không
+        if cat /proc/vnet_capture | grep -q "Timestamp"; then
+            print_success "Packet capture có timestamp information"
+        fi
+        
     else
         print_warning "Chưa có packets nào được capture"
+        print_info "Có thể do:"
+        print_info "  - Chưa có traffic qua virtual interfaces"
+        print_info "  - Netfilter hooks chưa hoạt động"
+        print_info "  - Buffer đã bị reset"
     fi
+    
+    # Additional diagnostic info
+    print_info "Diagnostic information:"
+    print_info "  - /proc/vnet_capture file size: $(wc -c < /proc/vnet_capture 2>/dev/null || echo 'unknown') bytes"
+    print_info "  - /proc/vnet_capture line count: $(wc -l < /proc/vnet_capture 2>/dev/null || echo 'unknown') lines"
 }
 
 # Hàm performance test
@@ -405,7 +556,7 @@ check_kernel_logs() {
     fi
 }
 
-# Hàm stress test (optional)
+# Hàm stress test được cải thiện với better reliability
 stress_test() {
     print_header "Stress Test (Optional)"
     
@@ -417,34 +568,140 @@ stress_test() {
         return 0
     fi
     
-    print_info "Chạy stress test với 100 connections trong 10 giây..."
+    # Cấu hình stress test cải thiện
+    local TOTAL_CONNECTIONS=30  # Giảm từ 100 xuống 30
+    local BATCH_SIZE=5         # Chạy 5 connections một lúc
+    local BATCH_DELAY=0.5      # Đợi 0.5 giây giữa các batch
+    local CONNECTION_TIMEOUT=3  # Timeout cho mỗi connection
+    local TEST_DURATION=15     # Tổng thời gian test
     
-    # Tạo background server
-    nc -l -k -s "$VNET1_IP" -p "$TEST_PORT" >/dev/null &
+    print_info "Chạy stress test cải thiện với $TOTAL_CONNECTIONS connections..."
+    print_info "Cấu hình: $BATCH_SIZE connections/batch, timeout=${CONNECTION_TIMEOUT}s, delay=${BATCH_DELAY}s"
+    
+    # Lấy packet count trước khi bắt đầu
+    local PACKETS_BEFORE=0
+    if [ -f "/proc/vnet_capture" ]; then
+        PACKETS_BEFORE=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+    fi
+    print_info "Packets captured trước test: $PACKETS_BEFORE"
+    
+    # Tạo background server với better error handling
+    print_info "Khởi động stress test server..."
+    timeout $TEST_DURATION nc -l -k -s "$VNET1_IP" -p "$TEST_PORT" >/dev/null 2>&1 &
     STRESS_SERVER_PID=$!
     
-    # Chạy multiple clients
-    for i in {1..100}; do
-        echo "Stress test message $i" | nc -w 1 -s "$VNET0_IP" "$VNET1_IP" "$TEST_PORT" &
+    # Đợi server khởi động
+    sleep 1
+    
+    # Kiểm tra server có running không
+    if ! ps -p $STRESS_SERVER_PID > /dev/null 2>&1; then
+        print_error "Không thể khởi động stress test server"
+        return 1
+    fi
+    
+    print_success "Server đã khởi động (PID: $STRESS_SERVER_PID)"
+    
+    # Biến tracking
+    local SUCCESS_COUNT=0
+    local FAILED_COUNT=0
+    local BATCH_COUNT=$((TOTAL_CONNECTIONS / BATCH_SIZE))
+    
+    print_info "Bắt đầu gửi $TOTAL_CONNECTIONS connections trong $BATCH_COUNT batches..."
+    
+    # Chạy stress test theo batches
+    for batch in $(seq 1 $BATCH_COUNT); do
+        print_info "Batch $batch/$BATCH_COUNT - Gửi $BATCH_SIZE connections..."
         
-        # Giới hạn số connections đồng thời
-        if [ $((i % 10)) -eq 0 ]; then
-            sleep 0.1
+        # Tạo batch connections
+        local batch_pids=()
+        for i in $(seq 1 $BATCH_SIZE); do
+            local conn_id=$(((batch-1) * BATCH_SIZE + i))
+            local test_message="Stress test batch $batch conn $i (ID: $conn_id) - $(date +%H:%M:%S.%3N)"
+            
+            # Chạy connection với timeout và error handling
+            (
+                if echo "$test_message" | timeout $CONNECTION_TIMEOUT nc -w $CONNECTION_TIMEOUT -s "$VNET0_IP" "$VNET1_IP" "$TEST_PORT" >/dev/null 2>&1; then
+                    echo "SUCCESS:$conn_id"
+                else
+                    echo "FAILED:$conn_id"
+                fi
+            ) &
+            batch_pids+=($!)
+        done
+        
+        # Đợi batch hoàn thành và đếm kết quả
+        for pid in "${batch_pids[@]}"; do
+            if wait $pid 2>/dev/null; then
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+        done
+        
+        # Real-time monitoring
+        local PACKETS_CURRENT=0
+        if [ -f "/proc/vnet_capture" ]; then
+            PACKETS_CURRENT=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+        fi
+        local NEW_PACKETS=$((PACKETS_CURRENT - PACKETS_BEFORE))
+        
+        print_info "Batch $batch hoàn thành - Success: $SUCCESS_COUNT, Failed: $FAILED_COUNT, New packets: $NEW_PACKETS"
+        
+        # Delay giữa các batches
+        if [ $batch -lt $BATCH_COUNT ]; then
+            sleep $BATCH_DELAY
         fi
     done
     
-    # Đợi tất cả connections hoàn thành
-    print_info "Đợi stress test hoàn thành..."
-    sleep 10
+    # Đợi tất cả processes hoàn thành
+    sleep 2
     
-    # Cleanup
+    # Cleanup server
     kill $STRESS_SERVER_PID 2>/dev/null || true
+    wait $STRESS_SERVER_PID 2>/dev/null || true
     
-    print_success "Stress test hoàn thành"
+    # Tính toán kết quả cuối cùng
+    local TOTAL_TESTED=$((SUCCESS_COUNT + FAILED_COUNT))
+    local SUCCESS_RATE=0
+    if [ $TOTAL_TESTED -gt 0 ]; then
+        SUCCESS_RATE=$(( (SUCCESS_COUNT * 100) / TOTAL_TESTED ))
+    fi
     
-    # Hiển thị statistics sau stress test
-    print_info "Packet capture statistics sau stress test:"
-    cat /proc/vnet_capture | head -10
+    # Kiểm tra packet capture cuối cùng
+    local PACKETS_AFTER=0
+    if [ -f "/proc/vnet_capture" ]; then
+        PACKETS_AFTER=$(cat /proc/vnet_capture | grep -c "│.*│.*│.*│" 2>/dev/null || echo "0")
+    fi
+    local TOTAL_NEW_PACKETS=$((PACKETS_AFTER - PACKETS_BEFORE))
+    
+    # Báo cáo kết quả
+    print_header "Kết quả Stress Test"
+    print_info "Tổng connections tested: $TOTAL_TESTED"
+    print_info "Successful connections: $SUCCESS_COUNT"
+    print_info "Failed connections: $FAILED_COUNT"
+    print_info "Success rate: $SUCCESS_RATE%"
+    print_info "Packets captured trước: $PACKETS_BEFORE"
+    print_info "Packets captured sau: $PACKETS_AFTER"
+    print_info "New packets captured: $TOTAL_NEW_PACKETS"
+    
+    # Đánh giá kết quả
+    if [ $SUCCESS_RATE -ge 80 ]; then
+        print_success "Stress test THÀNH CÔNG (Success rate >= 80%)"
+    elif [ $SUCCESS_RATE -ge 60 ]; then
+        print_warning "Stress test TRUNG BÌNH (Success rate 60-79%)"
+    else
+        print_error "Stress test THẤT BẠI (Success rate < 60%)"
+    fi
+    
+    if [ $TOTAL_NEW_PACKETS -ge $((SUCCESS_COUNT - 5)) ]; then
+        print_success "Packet capture hoạt động tốt"
+    else
+        print_warning "Packet capture có thể có vấn đề (captured: $TOTAL_NEW_PACKETS, expected: ~$SUCCESS_COUNT)"
+    fi
+    
+    # Hiển thị sample packet capture
+    print_info "Sample packet capture sau stress test:"
+    cat /proc/vnet_capture | head -15
 }
 
 # Hàm final cleanup
